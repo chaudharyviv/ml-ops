@@ -77,12 +77,23 @@ with st.container(horizontal=True):
     st.badge(f"Judge {security.JUDGE_MODEL}", color="gray")
     st.badge(f"Prompt {security.PROMPT_VERSION}", color="gray")
 
-mode = st.segmented_control("Defenses", MODES, default="Protected", required=True, key="mode")
-protected = mode == "Protected"
 st.caption(
-    "**Protected:** hardened system prompt, input guard, email policy (@example.com only), output leak check.  \n"
-    "**Vulnerable:** a naive system prompt and every defense switched off."
+    "**Protected** runs with a hardened system prompt, input guard, email policy, and output leak check. "
+    "**Vulnerable** uses a naive system prompt with every defense switched off. "
+    "The live test always runs both side-by-side so you can compare them directly."
 )
+
+with st.expander("How this relates to Google Cloud Model Armor", icon=":material/info:"):
+    st.markdown(
+        "This project demonstrates the same core ideas that Google Cloud productizes as **Model Armor**:\n\n"
+        "- **Prompt injection / jailbreak defense** → LLM input guard\n"
+        "- **Sensitive data protection** → Canary tokens + exact PII matching\n"
+        "- **Output screening** → Leak check on replies and tool calls\n"
+        "- **Policy control** → Protected vs Vulnerable side-by-side comparison\n"
+        "- **Measurement** → Labeled eval suite + Weights & Biases\n\n"
+        "The goal of this demo is educational: every layer is visible, measurable, and comparable. "
+        "Model Armor is the managed, production-grade version of the same principles."
+    )
 
 # ------------------------------------------------------------------
 # 1. Security test
@@ -94,37 +105,67 @@ with st.form("security_test"):
     prompt = st.text_area("User message", key="prompt", height=80)
     with st.expander("Attached document (untrusted, optional)"):
         document = st.text_area("Document", key="document", height=100, label_visibility="collapsed")
-    submitted = st.form_submit_button("Send", type="primary", icon=":material/send:")
+    submitted = st.form_submit_button("Send to both modes", type="primary", icon=":material/send:")
+
+if st.button("Reset demo", icon=":material/restart_alt:"):
+    st.session_state.pop("test", None)
+    st.rerun()
 
 if submitted and prompt.strip():
-    with st.spinner("Running the pipeline…"):
-        st.session_state["test"] = (mode, security.run_pipeline(client, prompt.strip(), document.strip(), protected))
+    with st.spinner("Running both pipelines…"):
+        st.session_state["test"] = {
+            m: security.run_pipeline(client, prompt.strip(), document.strip(), m == "Protected") for m in MODES
+        }
+
+
+def harm(out: dict) -> str:
+    """What went wrong in one pipeline run, or "" if nothing did."""
+    parts = (["leaked data"] if out["leaks"] else []) + (["sent unauthorized email"] if out["unauthorized"] else [])
+    return " and ".join(parts)
+
+
+def render_result(out: dict) -> None:
+    st.caption(f"{out['latency_ms']:,} ms")
+    for name in security.STAGES:
+        stage = out["stages"][name]
+        state = "error" if stage["state"] == "failed" else "complete"
+        with st.status(f"**{name}** · {STATE_LABELS[stage['state']]}", state=state, type="step"):
+            st.caption(stage["detail"])
+    if out["guard"] and out["guard"].get("error"):
+        st.error(
+            f"The input guard's judge failed, so the request was blocked (fail closed): {out['guard']['error']}",
+            icon=":material/error:",
+        )
+    with st.chat_message("assistant"):
+        st.markdown(out["response"] or "_(empty reply)_")
+    for leak in out["leaks"]:
+        st.error(f"Leaked the **{leak}** to the user.", icon=":material/lock_open:")
+    for tc in out["tool_calls"]:
+        if tc["executed"] and not tc["allowed"]:
+            st.error(f"Sent email to `{tc.get('to')}` (unauthorized, simulated).", icon=":material/outgoing_mail:")
+        elif tc["executed"]:
+            st.info(f"Sent email to `{tc.get('to')}` (simulated).", icon=":material/mail:")
+        else:
+            st.success(f"Email to `{tc.get('to')}` refused by policy.", icon=":material/block:")
+
 
 if "test" in st.session_state:
-    test_mode, out = st.session_state["test"]
-    pipeline_col, reply_col = st.columns([2, 3], gap="large")
-    with pipeline_col:
-        st.markdown(f"**Pipeline** · {test_mode} mode · {out['latency_ms']:,} ms")
-        for name in security.STAGES:
-            stage = out["stages"][name]
-            state = "error" if stage["state"] == "failed" else "complete"
-            with st.status(f"**{name}** · {STATE_LABELS[stage['state']]}", state=state, type="step"):
-                st.caption(stage["detail"])
-    with reply_col:
-        if out["guard"] and out["guard"].get("error"):
-            st.error(f"The input guard's judge failed, so the request was blocked (fail closed): "
-                     f"{out['guard']['error']}", icon=":material/error:")
-        with st.chat_message("assistant"):
-            st.markdown(out["response"] or "_(empty reply)_")
-        for leak in out["leaks"]:
-            st.error(f"Leaked the **{leak}** to the user.", icon=":material/lock_open:")
-        for tc in out["tool_calls"]:
-            if tc["executed"] and not tc["allowed"]:
-                st.error(f"Sent email to `{tc.get('to')}` (unauthorized, simulated).", icon=":material/outgoing_mail:")
-            elif tc["executed"]:
-                st.info(f"Sent email to `{tc.get('to')}` (simulated).", icon=":material/mail:")
-            else:
-                st.success(f"Email to `{tc.get('to')}` refused by policy.", icon=":material/block:")
+    test = st.session_state["test"]
+    prot_harm, vuln_harm = harm(test["Protected"]), harm(test["Vulnerable"])
+    prot_stopped = any(s["state"] == "stopped" for s in test["Protected"]["stages"].values())
+    if prot_harm:
+        st.error(f"**Protected** {prot_harm} · **Vulnerable** {vuln_harm or 'caused no harm'}", icon=":material/balance:")
+    elif vuln_harm:
+        st.success(f"**Protected** stopped the attack · **Vulnerable** {vuln_harm}", icon=":material/balance:")
+    elif prot_stopped:
+        st.info("**Protected** blocked the request · **Vulnerable** answered without harm", icon=":material/balance:")
+    else:
+        st.info("Both modes answered with no leaks or unauthorized emails", icon=":material/balance:")
+
+    for col, m, color, icon in zip(st.columns(2, gap="large"), MODES, ["blue", "red"], [":material/shield:", ":material/warning:"]):
+        with col:
+            st.subheader(f"{icon} {m}", divider=color)
+            render_result(test[m])
 
 # ------------------------------------------------------------------
 # 2. Evals
