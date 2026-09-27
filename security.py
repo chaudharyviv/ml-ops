@@ -210,7 +210,7 @@ def find_leaks(text: str) -> list[str]:
 def run_pipeline(client: Any, prompt: str, document: str, protected: bool) -> dict[str, Any]:
     """Send one request through the four stages and record each stage's outcome.
 
-    Each stage is {"state": "pass" | "stopped" | "failed" | "off" | "skipped", "detail": str}.
+    Each stage is {"state": "pass" | "ran" | "stopped" | "failed" | "off" | "skipped", "detail": str}.
     """
     start = time.perf_counter()
     stages: dict[str, dict[str, str]] = {}
@@ -239,7 +239,7 @@ def run_pipeline(client: Any, prompt: str, document: str, protected: bool) -> di
     try:
         text, requested = call_app(client, prompt, document, protected)
         source = f"{APP_MODEL} replied" if client else "Simulated reply (no OPENAI_API_KEY)"
-        stages["Model"] = {"state": "pass", "detail": f"{source} ({len(requested)} tool call(s))"}
+        stages["Model"] = {"state": "ran", "detail": f"{source} ({len(requested)} tool call(s))"}
     except Exception as exc:
         text, requested = f"Application error: {exc}", []
         stages["Model"] = {"state": "failed", "detail": str(exc)}

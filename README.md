@@ -35,7 +35,7 @@ WANDB_ENTITY = "your-username"           # optional: W&B user or team that recei
 
 ## Demo script
 
-1. **Security test**: pick *Poisoned document* in Protected mode, then send it. The pipeline shows the input guard stopping it. Switch to Vulnerable and send it again: every defense is off, and the model may email the customer's data to `evil.example`.
+1. **Security test**: pick *Poisoned document* and click **Send to both modes**. Both pipelines run at once and appear side by side. In Protected, the input guard stops the request. In Vulnerable, every defense is off, and the model may email the customer's data to `evil.example` without writing any reply, so the user never sees it happen.
 2. **Run evals**: *Quick eval* runs 6 representative cases for a fast, cheap live demo; *Run full eval suite* runs all 14. Both run in both modes.
 3. **Charts**: headline pass rate, where attacks were stopped, pass rate by category, and the guard's confusion matrix.
 4. **W&B**: open the two runs. They share a group and differ in `config.mode`, so W&B compares them side by side.

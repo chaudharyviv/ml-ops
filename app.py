@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import altair as alt
 import pandas as pd
@@ -24,6 +25,7 @@ OUTCOMES = ["Input guard", "Model refused", "Tool policy", "Output check", "Got 
 OUTCOME_COLORS = alt.Scale(domain=OUTCOMES, range=["#1f77b4", "#8ab8e0", "#2ca02c", "#9467bd", "#d62728"])
 STATE_LABELS = {
     "pass": ":gray[passed through]",
+    "ran": ":gray[replied]",   # the model answered; whether that was safe is judged by later stages
     "stopped": ":green[:material/shield: stopped it]",
     "failed": ":red[:material/warning: failed]",
     "off": ":gray[off]",
@@ -85,14 +87,20 @@ st.caption(
 
 with st.expander("How this relates to Google Cloud Model Armor", icon=":material/info:"):
     st.markdown(
-        "This project demonstrates the same core ideas that Google Cloud productizes as **Model Armor**:\n\n"
-        "- **Prompt injection / jailbreak defense** → LLM input guard\n"
-        "- **Sensitive data protection** → Canary tokens + exact PII matching\n"
-        "- **Output screening** → Leak check on replies and tool calls\n"
-        "- **Policy control** → Protected vs Vulnerable side-by-side comparison\n"
-        "- **Measurement** → Labeled eval suite + Weights & Biases\n\n"
-        "The goal of this demo is educational: every layer is visible, measurable, and comparable. "
-        "Model Armor is the managed, production-grade version of the same principles."
+        "Model Armor is Google Cloud's managed service for screening prompts and responses. "
+        "It covers some of this demo's layers, not all of them.\n\n"
+        "**What Model Armor would replace**\n"
+        "- **Input guard** → its prompt-injection and jailbreak detection\n"
+        "- **Output check** → its response screening, which uses Sensitive Data Protection to find real "
+        "data types (emails, phone numbers, card numbers). This demo instead plants fake canary values, so a "
+        "leak is provable by exact match.\n"
+        "- **Protected / Vulnerable switch** → a much simpler version of its templates, which set a confidence "
+        "level per filter and choose between inspect-only and blocking\n\n"
+        "**What you still build yourself**\n"
+        "- **Tool policy**: limiting what the agent's tools can do (here, email only @example.com) is the "
+        "application's job. It's the layer that stops the poisoned-ticket email.\n"
+        "- **Evals**: a labeled test set that proves the guard works, whichever guard you use\n"
+        "- **Tracking**: W&B runs that show when a change makes security better or worse"
     )
 
 # ------------------------------------------------------------------
@@ -112,10 +120,13 @@ if st.button("Reset demo", icon=":material/restart_alt:"):
     st.rerun()
 
 if submitted and prompt.strip():
-    with st.spinner("Running both pipelines…"):
-        st.session_state["test"] = {
-            m: security.run_pipeline(client, prompt.strip(), document.strip(), m == "Protected") for m in MODES
+    with st.spinner("Running both pipelines…"), ThreadPoolExecutor(max_workers=len(MODES)) as pool:
+        # Both modes at once: the wait is the slower pipeline, not the sum of both
+        futures = {
+            m: pool.submit(security.run_pipeline, client, prompt.strip(), document.strip(), m == "Protected")
+            for m in MODES
         }
+        st.session_state["test"] = {m: f.result() for m, f in futures.items()}
 
 
 def harm(out: dict) -> str:
@@ -129,7 +140,8 @@ def render_result(out: dict) -> None:
     for name in security.STAGES:
         stage = out["stages"][name]
         state = "error" if stage["state"] == "failed" else "complete"
-        with st.status(f"**{name}** · {STATE_LABELS[stage['state']]}", state=state, type="step"):
+        with st.status(f"**{name}** · {STATE_LABELS[stage['state']]}", state=state, type="step",
+                       expanded=stage["state"] in ("stopped", "failed")):
             st.caption(stage["detail"])
     if out["guard"] and out["guard"].get("error"):
         st.error(
@@ -137,9 +149,11 @@ def render_result(out: dict) -> None:
             icon=":material/error:",
         )
     with st.chat_message("assistant"):
-        st.markdown(out["response"] or "_(empty reply)_")
+        st.markdown(out["response"] or ("_(no text reply, only tool calls)_" if out["tool_calls"] else "_(empty reply)_"))
+    in_reply = security.find_leaks(out["response"])
     for leak in out["leaks"]:
-        st.error(f"Leaked the **{leak}** to the user.", icon=":material/lock_open:")
+        where = "to the user" if leak in in_reply else "in an outgoing email"
+        st.error(f"Leaked the **{leak}** {where}.", icon=":material/lock_open:")
     for tc in out["tool_calls"]:
         if tc["executed"] and not tc["allowed"]:
             st.error(f"Sent email to `{tc.get('to')}` (unauthorized, simulated).", icon=":material/outgoing_mail:")
