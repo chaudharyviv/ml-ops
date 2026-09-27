@@ -1,0 +1,13 @@
+# Secrets
+.streamlit/secrets.toml
+.env
+
+# Local state and outputs
+*.sqlite3
+eval-report.json
+wandb/
+
+# Python
+__pycache__/
+venv/
+.venv/
